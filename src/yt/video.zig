@@ -192,8 +192,16 @@ pub const Video = struct {
         const unescaped_url = try std.Uri.unescapeString(self.allocator, sign[start..]);
         defer self.allocator.free(unescaped_url);
 
-        const url = try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}", .{ unescaped_url, sp, cipher });
-        return url;
+        // Find ncode
+        start = 2 + (std.mem.indexOf(u8, unescaped_url, "n=") orelse return DecodePlayerError.InvalidCipher);
+        end = start + (std.mem.indexOf(u8, unescaped_url[start..], "&") orelse return DecodePlayerError.InvalidCipher);
+
+        // run ncode
+        const ncode_call = try std.fmt.allocPrint(self.allocator, "{s}(\"{s}\")", .{ self.ncode_func.?, unescaped_url[start..end] });
+        defer self.allocator.free(ncode_call);
+
+        const ncode = (try self.vm.eval(ncode_call) orelse return DecodePlayerError.InvalidCipher).string;
+        return try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}&n={s}", .{ unescaped_url, sp, cipher, ncode });
     }
 
     fn fetchDeobfuscatePlayer(self: *Self) !void {
@@ -217,6 +225,7 @@ pub const Video = struct {
         // Find the struct with functions
         var start = 14 + (std.mem.indexOf(u8, body.items, "a=a.split(\"\");") orelse return FetchPlayerError.DeobfuscationFailed);
         var end = start + (std.mem.indexOf(u8, body.items[start..], ".") orelse return FetchPlayerError.DeobfuscationFailed);
+        std.debug.print("1 {s}\n", .{body.items[start..end]});
 
         const struct_name = try std.fmt.allocPrint(self.allocator, "var {s}={s}", .{ body.items[start..end], "{" });
         defer self.allocator.free(struct_name);
@@ -224,6 +233,7 @@ pub const Video = struct {
         start = std.mem.indexOf(u8, body.items, struct_name) orelse return FetchPlayerError.DeobfuscationFailed;
         end = 2 + start + (std.mem.indexOf(u8, body.items[start..], "};") orelse return FetchPlayerError.DeobfuscationFailed);
         try self.vm.compile(body.items[start..end]);
+        std.debug.print("2 {s}\n", .{body.items[start..end]});
 
         // Find decipher function
         start = 25 + (std.mem.indexOf(u8, body.items, "a.set(\"alr\",\"yes\");c&&(c=") orelse return FetchPlayerError.DeobfuscationFailed);
@@ -236,6 +246,7 @@ pub const Video = struct {
         start = std.mem.indexOf(u8, body.items, decipher_name) orelse return FetchPlayerError.DeobfuscationFailed;
         end = 19 + start + (std.mem.indexOf(u8, body.items[start..], "return a.join(\"\")};") orelse return FetchPlayerError.DeobfuscationFailed);
         try self.vm.compile(body.items[start..end]);
+        std.debug.print("3 {s}\n", .{body.items[start..end]});
 
         // Find ncode function
         start = 21 + (std.mem.indexOf(u8, body.items, "&&(b=a.get(\"n\"))&&(b=") orelse return FetchPlayerError.DeobfuscationFailed);
@@ -244,9 +255,15 @@ pub const Video = struct {
 
         const ncode_array = try std.fmt.allocPrint(self.allocator, "var {s}=[", .{body.items[start..end]});
         defer self.allocator.free(ncode_array);
+        std.debug.print("4 {s}\n", .{body.items[start..end]});
+
+        start = std.mem.indexOf(u8, body.items, ncode_array) orelse return FetchPlayerError.DeobfuscationFailed;
+        end = 1 + start + (std.mem.indexOf(u8, body.items[start..], "]") orelse return FetchPlayerError.DeobfuscationFailed);
+        try self.vm.compile(body.items[start..end]);
 
         start = ncode_array.len + (std.mem.indexOf(u8, body.items, ncode_array) orelse return FetchPlayerError.DeobfuscationFailed);
         end = start + (std.mem.indexOf(u8, body.items[start..], "]") orelse return FetchPlayerError.DeobfuscationFailed);
+        std.debug.print("5 {s}\n", .{body.items[start..end]});
 
         const ncode_name = try std.fmt.allocPrint(self.allocator, "{s}=function(a)", .{body.items[start..end]});
         defer self.allocator.free(ncode_name);
@@ -255,6 +272,7 @@ pub const Video = struct {
         end = 19 + start + (std.mem.indexOf(u8, body.items[start..], "return b.join(\"\")};") orelse return FetchPlayerError.DeobfuscationFailed);
         try self.vm.compile(body.items[start..end]);
 
+        std.debug.print("6 {s}\n", .{body.items[start..end]});
         self.player = true;
     }
 
