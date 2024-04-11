@@ -13,6 +13,6 @@ pub fn main() !void {
     defer stream_info.dealloc();
 
     for (stream_info.list.items) |stream| {
-        std.debug.print("video: {any}, audio: {any}, url: {s}\n\nl", .{ stream.quality, stream.audio_quality, stream.url });
+        std.debug.print("video: {any}, audio: {any}, url: {s}\n\n", .{ stream.quality, stream.audio_quality, stream.url });
     }
 }
