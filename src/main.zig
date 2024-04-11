@@ -4,8 +4,8 @@ const Video = @import("yt/video.zig").Video;
 const allocator = std.heap.page_allocator;
 
 pub fn main() !void {
-    var args = std.process.args(); //why does this only compile with "var"??
-    _ = args.skip(); //to skip the zig call
+    var args = std.process.args();
+    _ = args.skip();
     var video = try Video.fetch(allocator, args.next() orelse return);
     defer video.dealloc();
 
