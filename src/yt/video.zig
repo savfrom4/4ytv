@@ -13,7 +13,6 @@ pub const Video = struct {
     allocator: std.mem.Allocator,
     vm: js.Context,
     player_url: []const u8,
-    player: bool,
     decipher_func: ?[]const u8,
     ncode_func: ?[]const u8,
 
@@ -56,7 +55,6 @@ pub const Video = struct {
             .vm = vm,
 
             .player_url = try std.fmt.allocPrint(allocator, "https://youtube.com/s/player/{s}", .{player_url}), // stored in body, so we need to dupe
-            .player = false,
             .decipher_func = null,
             .ncode_func = null,
         };
@@ -164,29 +162,31 @@ pub const Video = struct {
     }
 
     fn decodeStream(self: *Self, sign: []const u8) ![]const u8 {
+        std.debug.print("stream is encoded, decoing needed...\n", .{});
+
         // if player script is not there we need to fetch & deobfuscate it too
-        if (!self.player) {
+        if (self.decipher_func == null or self.ncode_func == null) {
             try fetchDeobfuscatePlayer(self);
         }
-
-        // Find everything we need
-        const cipher = utils.findBetween(sign, "s=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
-        const sp = utils.findBetween(sign, "sp=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
 
         // Url is the last element... probably... most of the times?
         const url = try std.Uri.unescapeString(self.allocator, utils.findBetween(sign, "url=", null, .none) orelse return DecodePlayerError.InvalidCipher);
         defer self.allocator.free(url);
 
+        // Find everything we need
+        const cipher = utils.findBetween(sign, "s=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
+        const sp = utils.findBetween(sign, "sp=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
         const ncode = utils.findBetween(url, "&n=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
 
         // Get decipher result & dencode result
         const decipher = try self.allocator.dupe(u8, ((try self.vm.call(self.decipher_func.?, .{cipher})) orelse return DecodePlayerError.InvalidCipher).string);
         defer self.allocator.free(decipher);
+        std.debug.print("decipher: {s}\n", .{decipher});
 
         const dencode = try self.allocator.dupe(u8, ((try self.vm.call(self.ncode_func.?, .{ncode})) orelse return DecodePlayerError.InvalidCipher).string);
         defer self.allocator.free(dencode);
+        std.debug.print("dencode: {s}\n", .{dencode});
 
-        std.debug.print("de: {s}\n", .{decipher});
         return try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}&n={s}", .{ url, sp, decipher, dencode });
     }
 
@@ -208,63 +208,60 @@ pub const Video = struct {
         if (result.status.class() != .success)
             return FetchPlayerError.InvalidPlayerUrl;
 
-        // Find the struct with functions
-        var start = 14 + (std.mem.indexOf(u8, body.items, "a=a.split(\"\");") orelse return FetchPlayerError.DeobfuscationFailed);
-        var end = start + (std.mem.indexOf(u8, body.items[start..], ".") orelse return FetchPlayerError.DeobfuscationFailed);
-        std.debug.print("1 {s}\n", .{body.items[start..end]});
+        // Find the structure containg the function & compile it
+        const struct_name = try std.fmt.allocPrint(self.allocator, "var {s}={{", .{
+            utils.findBetween(body.items, "a=a.split(\"\");", ".", .none) orelse return FetchPlayerError.DeobfuscationFailed,
+        });
 
-        const struct_name = try std.fmt.allocPrint(self.allocator, "var {s}={s}", .{ body.items[start..end], "{" });
-        defer self.allocator.free(struct_name);
+        try self.vm.compile(
+            utils.findBetween(body.items, struct_name, "};", .both) orelse return FetchPlayerError.DeobfuscationFailed,
+        );
+        self.allocator.free(struct_name);
 
-        start = std.mem.indexOf(u8, body.items, struct_name) orelse return FetchPlayerError.DeobfuscationFailed;
-        end = 2 + start + (std.mem.indexOf(u8, body.items[start..], "};") orelse return FetchPlayerError.DeobfuscationFailed);
-        try self.vm.compile(body.items[start..end]);
-        std.debug.print("2 {s}\n", .{body.items[start..end]});
+        // Find decipher function name
+        self.decipher_func = try self.allocator.dupe(
+            u8,
+            utils.findBetween(body.items, "a.set(\"alr\",\"yes\");c&&(c=", "(decodeURIC", .none) orelse return FetchPlayerError.DeobfuscationFailed,
+        );
 
-        // Find decipher function
-        start = 25 + (std.mem.indexOf(u8, body.items, "a.set(\"alr\",\"yes\");c&&(c=") orelse return FetchPlayerError.DeobfuscationFailed);
-        end = start + (std.mem.indexOf(u8, body.items[start..], "(decodeURIC") orelse return FetchPlayerError.DeobfuscationFailed);
-        self.decipher_func = try self.allocator.dupe(u8, body.items[start..end]);
+        // Find decipher function body & compile it
+        const decipher_name = try std.fmt.allocPrint(self.allocator, "{s}=function(a)", .{self.decipher_func.?});
+        const decipher_body = try std.fmt.allocPrint(self.allocator, "var {s}", .{
+            utils.findBetween(body.items, decipher_name, "return a.join(\"\")};", .both) orelse return FetchPlayerError.DeobfuscationFailed,
+        });
 
-        const decipher_name = try std.fmt.allocPrint(self.allocator, "{s}=function(a)", .{body.items[start..end]});
-        defer self.allocator.free(decipher_name);
+        try self.vm.compile(decipher_body);
+        self.allocator.free(decipher_name);
+        self.allocator.free(decipher_body);
 
-        start = std.mem.indexOf(u8, body.items, decipher_name) orelse return FetchPlayerError.DeobfuscationFailed;
-        end = 19 + start + (std.mem.indexOf(u8, body.items[start..], "return a.join(\"\")};") orelse return FetchPlayerError.DeobfuscationFailed);
+        // Find array that contains ncode function name & compile it
+        const ncode_array_name = try std.fmt.allocPrint(self.allocator, "var {s}=[", .{
+            utils.findBetween(body.items, "&&(b=a.get(\"n\"))&&(b=", "[0](b)", .none) orelse return FetchPlayerError.DeobfuscationFailed,
+        });
 
-        const tt = try std.fmt.allocPrint(self.allocator, "var {s}", .{body.items[start..end]});
-        try self.vm.compile(tt);
-        std.debug.print("3 {s}\n", .{tt});
+        const ncode_array = utils.findBetween(body.items, ncode_array_name, "]", .both) orelse return FetchPlayerError.DeobfuscationFailed;
+        self.allocator.free(ncode_array_name);
 
-        // Find ncode function
-        start = 21 + (std.mem.indexOf(u8, body.items, "&&(b=a.get(\"n\"))&&(b=") orelse return FetchPlayerError.DeobfuscationFailed);
-        end = (std.mem.indexOf(u8, body.items, "[0](b)") orelse return FetchPlayerError.DeobfuscationFailed);
+        try self.vm.compile(ncode_array);
 
-        const ncode_array = try std.fmt.allocPrint(self.allocator, "var {s}=[", .{body.items[start..end]});
-        defer self.allocator.free(ncode_array);
+        // Find ncode function name in that array
+        self.ncode_func = try self.allocator.dupe(
+            u8,
+            utils.findBetween(ncode_array, "[", "]", .none) orelse return FetchPlayerError.DeobfuscationFailed,
+        );
 
-        start = std.mem.indexOf(u8, body.items, ncode_array) orelse return FetchPlayerError.DeobfuscationFailed;
-        end = 1 + start + (std.mem.indexOf(u8, body.items[start..], "]") orelse return FetchPlayerError.DeobfuscationFailed);
-        try self.vm.compile(body.items[start..end]);
-        std.debug.print("4 {s}\n", .{body.items[start..end]});
+        // Find ncode function body & compile it
+        const ncode_function_name = try std.fmt.allocPrint(self.allocator, "{s}=function(a)", .{
+            self.ncode_func.?,
+        });
 
-        start = ncode_array.len + (std.mem.indexOf(u8, body.items, ncode_array) orelse return FetchPlayerError.DeobfuscationFailed);
-        end = start + (std.mem.indexOf(u8, body.items[start..], "]") orelse return FetchPlayerError.DeobfuscationFailed);
-        self.ncode_func = try self.allocator.dupe(u8, body.items[start..end]);
-        std.debug.print("5 {s}\n", .{body.items[start..end]});
+        const ncode_function_body = try std.fmt.allocPrint(self.allocator, "var {s}", .{
+            utils.findBetween(body.items, ncode_function_name, "return b.join(\"\")};", .both) orelse return FetchPlayerError.DeobfuscationFailed,
+        });
 
-        const ncode_name = try std.fmt.allocPrint(self.allocator, "{s}=function(a)", .{body.items[start..end]});
-        defer self.allocator.free(ncode_name);
-
-        start = (std.mem.indexOf(u8, body.items, ncode_name) orelse return FetchPlayerError.DeobfuscationFailed);
-        end = 19 + start + (std.mem.indexOf(u8, body.items[start..], "return b.join(\"\")};") orelse return FetchPlayerError.DeobfuscationFailed);
-
-        const fixedBody = try std.fmt.allocPrint(self.allocator, "var {s}", .{body.items[start..end]});
-        defer self.allocator.free(fixedBody);
-        try self.vm.compile(fixedBody);
-
-        std.debug.print("6 {s}\n", .{fixedBody});
-        self.player = true;
+        try self.vm.compile(ncode_function_body);
+        self.allocator.free(ncode_function_name);
+        self.allocator.free(ncode_function_body);
     }
 
     const FetchError = error{
