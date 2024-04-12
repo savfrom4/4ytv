@@ -3,11 +3,19 @@ const js = @import("duktape");
 const cs = @import("constants.zig");
 const utils = @import("utils.zig");
 
+pub const PartialVideo = struct {
+    id: []const u8,
+    title: []const u8,
+    views: []const u8,
+    thumbnail_url: []const u8,
+};
+
 pub const Video = struct {
     // External
     id: []const u8,
     title: []const u8,
     views: []const u8,
+    related: std.ArrayList(PartialVideo),
 
     // Internal
     allocator: std.mem.Allocator,
@@ -45,11 +53,32 @@ pub const Video = struct {
         const player_url = utils.findBetween(body.items, "\"jsUrl\":\"/s/player/", "\"", .none) orelse return FetchError.MissingPlayerData;
         const title = try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.results.results.contents[0].videoPrimaryInfoRenderer.title.runs[0].text") orelse return FetchError.MissingPlayerData;
         const views = try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.results.results.contents[0].videoPrimaryInfoRenderer.viewCount.videoViewCountRenderer.viewCount.simpleText") orelse return FetchError.MissingPlayerData;
+        
+        const secondary_length = (try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results.length") orelse return FetchError.MissingPlayerData).number;
+        var related = std.ArrayList(PartialVideo).init(allocator);
+        for(0..@intFromFloat(secondary_length)) |idx| {
+            const query = try std.fmt.allocPrint(allocator, "JSON.stringify(ytInitialData.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[{d}])", .{idx});
+            defer allocator.free(query);
+            
+            const json = try std.json.parseFromSlice(std.json.Value, allocator, (try vm.eval(query) orelse return FetchError.MissingPlayerData).string, .{});
+            defer json.deinit();  
+//            json.value.dump();
+
+            const root = (json.value.object.get("compactVideoRenderer") orelse continue).object;
+            try related.append(PartialVideo {
+                .id = root.get("videoId").?.string,
+                .title = root.get("title").?.object.get("simpleText").?.string,
+                .thumbnail_url = root.get("thumbnail").?.object.get("thumbnails").?.array.items[0].object
+                    .get("url").?.string,
+                .views = root.get("viewCountText").?.object.get("simpleText").?.string,
+            });
+        }
 
         return Video{
             .id = id, // i sure hope ID outlives this video struct
             .title = title.string,
             .views = views.string,
+            .related = related,
 
             .allocator = allocator,
             .vm = vm,
