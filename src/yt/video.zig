@@ -3,13 +3,6 @@ const js = @import("duktape");
 const cs = @import("constants.zig");
 const utils = @import("utils.zig");
 
-pub const PartialVideo = struct {
-    id: []const u8,
-    title: []const u8,
-    views: []const u8,
-    thumbnail_url: []const u8,
-};
-
 pub const Video = struct {
     // External
     id: []const u8,
@@ -21,8 +14,8 @@ pub const Video = struct {
     allocator: std.mem.Allocator,
     vm: js.Context,
     player_url: []const u8,
-    decipher_func: ?[]const u8,
-    ncode_func: ?[]const u8,
+    decipher_func: ?[]const u8 = null,
+    ncode_func: ?[]const u8 = null,
 
     pub fn fetch(allocator: std.mem.Allocator, id: []const u8) !Video {
         var vm = try js.Context.alloc();
@@ -49,58 +42,61 @@ pub const Video = struct {
         try vm.compile(utils.findBetween(body.items, "var ytInitialData =", "</script>", .left) orelse return FetchError.MissingPlayerData);
         try vm.compile(utils.findBetween(body.items, "var ytInitialPlayerResponse =", "</script>", .left) orelse return FetchError.MissingPlayerData);
 
-        // Url of the player script (contains decipher and ncode functions)
-        const player_url = utils.findBetween(body.items, "\"jsUrl\":\"/s/player/", "\"", .none) orelse return FetchError.MissingPlayerData;
-        const title = try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.results.results.contents[0].videoPrimaryInfoRenderer.title.runs[0].text") orelse return FetchError.MissingPlayerData;
-        const views = try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.results.results.contents[0].videoPrimaryInfoRenderer.viewCount.videoViewCountRenderer.viewCount.simpleText") orelse return FetchError.MissingPlayerData;
-        
-        const secondary_length = (try vm.eval("ytInitialData.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results.length") orelse return FetchError.MissingPlayerData).number;
-        var related = std.ArrayList(PartialVideo).init(allocator);
-        for(0..@intFromFloat(secondary_length)) |idx| {
-            const query = try std.fmt.allocPrint(allocator, "JSON.stringify(ytInitialData.contents.twoColumnWatchNextResults.secondaryResults.secondaryResults.results[{d}])", .{idx});
-            defer allocator.free(query);
-            
-            const json = try std.json.parseFromSlice(std.json.Value, allocator, (try vm.eval(query) orelse return FetchError.MissingPlayerData).string, .{});
-            defer json.deinit();  
-//            json.value.dump();
+        const json = try std.json.parseFromSlice(std.json.Value, allocator, (try vm.eval("JSON.stringify(ytInitialData)") orelse return FetchError.MissingPlayerData).string, .{});
+        defer json.deinit();
 
-            const root = (json.value.object.get("compactVideoRenderer") orelse continue).object;
-            try related.append(PartialVideo {
-                .id = root.get("videoId").?.string,
-                .title = root.get("title").?.object.get("simpleText").?.string,
-                .thumbnail_url = root.get("thumbnail").?.object.get("thumbnails").?.array.items[0].object
-                    .get("url").?.string,
-                .views = root.get("viewCountText").?.object.get("simpleText").?.string,
-            });
+        // Get all video info
+        const video_root = json.value.object.get("contents").?.object.get("twoColumnWatchNextResults").?.object.get("results").?.object.get("results").?.object.get("contents").?.array.items[0].object.get("videoPrimaryInfoRenderer").?.object;
+        const title = try allocator.dupe(u8, video_root.get("title").?.object.get("runs").?.array.items[0].object.get("text").?.string);
+        const views = try allocator.dupe(u8, video_root.get("viewCount").?.object.get("videoViewCountRenderer").?.object.get("viewCount").?.object.get("simpleText").?.string);
+        const player_url = utils.findBetween(body.items, "\"jsUrl\":\"/s/player/", "\"", .none) orelse return FetchError.MissingPlayerData;
+
+        var related = std.ArrayList(PartialVideo).init(allocator);
+        for (json.value.object.get("contents").?.object.get("twoColumnWatchNextResults").?.object.get("secondaryResults").?.object.get("secondaryResults").?.object.get("results").?.array.items) |item| {
+            for (item.object.values()) |value| {
+                const parsed = std.json.parseFromValue(PartialVideo.Serializable, allocator, value, .{
+                    .ignore_unknown_fields = true,
+                }) catch continue;
+                defer parsed.deinit();
+
+                try related.append(try parsed.value.toPartial(allocator));
+            }
         }
 
         return Video{
             .id = id, // i sure hope ID outlives this video struct
-            .title = title.string,
-            .views = views.string,
+            .title = title,
+            .views = views,
             .related = related,
 
             .allocator = allocator,
             .vm = vm,
 
             .player_url = try std.fmt.allocPrint(allocator, "https://youtube.com/s/player/{s}", .{player_url}), // stored in body, so we need to dupe
-            .decipher_func = null,
-            .ncode_func = null,
         };
     }
 
     const Self = @This();
     pub fn dealloc(self: Self) void {
-        var _vm = self.vm;
-        _vm.dealloc();
-
+        self.allocator.free(self.title);
+        self.allocator.free(self.views);
         self.allocator.free(self.player_url);
+
         if (self.decipher_func) |func| {
             self.allocator.free(func);
         }
+
         if (self.ncode_func) |func| {
             self.allocator.free(func);
         }
+
+        for (self.related.items) |value| {
+            value.dealloc();
+        }
+        self.related.deinit();
+
+        var _vm = self.vm;
+        _vm.dealloc();
     }
 
     pub fn fetchStreamInfo(self: *Self) !StreamInfo {
@@ -191,8 +187,6 @@ pub const Video = struct {
     }
 
     fn decodeStream(self: *Self, sign: []const u8) ![]const u8 {
-        std.debug.print("stream is encoded, decoing needed...\n", .{});
-
         // if player script is not there we need to fetch & deobfuscate it too
         if (self.decipher_func == null or self.ncode_func == null) {
             try fetchDeobfuscatePlayer(self);
@@ -210,11 +204,9 @@ pub const Video = struct {
         // Get decipher result & dencode result
         const decipher = try self.allocator.dupe(u8, ((try self.vm.call(self.decipher_func.?, .{cipher})) orelse return DecodePlayerError.InvalidCipher).string);
         defer self.allocator.free(decipher);
-        std.debug.print("decipher: {s}\n", .{decipher});
 
         const dencode = try self.allocator.dupe(u8, ((try self.vm.call(self.ncode_func.?, .{ncode})) orelse return DecodePlayerError.InvalidCipher).string);
         defer self.allocator.free(dencode);
-        std.debug.print("dencode: {s}\n", .{dencode});
 
         return try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}&n={s}", .{ url, sp, decipher, dencode });
     }
@@ -384,5 +376,57 @@ pub const StreamInfo = struct {
             @"audio/mp4",
             @"audio/webm",
         };
+    };
+};
+
+pub const PartialVideo = struct {
+    allocator: std.mem.Allocator,
+    id: []const u8,
+    title: []const u8,
+    views: []const u8,
+    thumbnail_url: std.ArrayList([]const u8),
+
+    pub fn dealloc(self: @This()) void {
+        self.allocator.free(self.id);
+        self.allocator.free(self.title);
+        self.allocator.free(self.views);
+
+        for (self.thumbnail_url.items) |value| {
+            self.allocator.free(value);
+        }
+
+        self.thumbnail_url.deinit();
+    }
+
+    const Serializable = struct {
+        videoId: []const u8,
+
+        title: struct {
+            simpleText: []const u8,
+        },
+
+        thumbnail: struct {
+            thumbnails: []const struct { url: []const u8 },
+        },
+
+        viewCountText: struct {
+            simpleText: []const u8,
+        },
+
+        pub fn toPartial(self: @This(), allocator: std.mem.Allocator) !PartialVideo {
+            var video = PartialVideo{
+                .allocator = allocator,
+                .id = try allocator.dupe(u8, self.videoId),
+                .title = try allocator.dupe(u8, self.title.simpleText),
+                .views = try allocator.dupe(u8, self.viewCountText.simpleText),
+                .thumbnail_url = std.ArrayList([]const u8).init(allocator),
+            };
+
+            for (self.thumbnail.thumbnails) |value| {
+                try video.thumbnail_url.append(try allocator.dupe(u8, value.url));
+            }
+
+            return video;
+        }
     };
 };

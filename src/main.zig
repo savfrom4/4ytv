@@ -11,12 +11,12 @@ pub fn main() !void {
 
     var stream_info = try video.fetchStreamInfo();
     defer stream_info.dealloc();
-    
-    for(video.related.items) |related| {
-        std.debug.print("{any}", .{related});
+
+    for (video.related.items) |related| {
+        std.debug.print("related {{ title: {s}, id {s} }}\n", .{ related.title, related.id });
     }
 
     for (stream_info.list.items) |stream| {
-        std.debug.print("video: {any}, audio: {any}, url: {s}\n\n", .{ stream.quality, stream.audio_quality, stream.url });
+        std.debug.print("video: {{ video: {any}, audio: {any}, url: {s} }}\n", .{ stream.quality, stream.audio_quality, stream.url });
     }
 }
