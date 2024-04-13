@@ -50,7 +50,7 @@ pub const Video = struct {
         const json = try std.json.parseFromSlice(
             std.json.Value,
             allocator,
-            utils.findBetween(initial_data, "var ytInitialData =", ";", .none) orelse return FetchError.MissingPlayerData,
+            utils.findBetween(body.items, "var ytInitialData =", ";</script>", .none) orelse return FetchError.MissingPlayerData,
             .{},
         );
         defer json.deinit();
