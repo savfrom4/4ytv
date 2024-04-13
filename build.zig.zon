@@ -5,8 +5,8 @@
 
     .dependencies = .{
         .@"duktape-zig" = .{
-            .url = "https://github.com/savfrom4/duktape-zig/archive/refs/tags/0.1.45.tar.gz",
-            .hash = "1220e651dc58b96e203196a9048a47672a944aad9bf1444c7281e01aaa9c0af947f9",
+            .url = "https://github.com/savfrom4/duktape-zig/archive/refs/tags/0.1.46.tar.gz",
+            .hash = "1220a818218dc3e1ae12d75f1239f074ed455a98a02f8bf2ca934c1843542471ee7a",
         },
     },
 

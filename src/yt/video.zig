@@ -19,6 +19,8 @@ pub const Video = struct {
 
     pub fn fetch(allocator: std.mem.Allocator, id: []const u8) !Video {
         var vm = try js.Context.alloc();
+        defer vm.clearStack();
+
         var client = std.http.Client{ .allocator = allocator };
         defer client.deinit();
 
@@ -39,10 +41,18 @@ pub const Video = struct {
             return FetchError.InvalidVideo;
 
         // Load player data into js engine
-        try vm.compile(utils.findBetween(body.items, "var ytInitialData =", "</script>", .left) orelse return FetchError.MissingPlayerData);
-        try vm.compile(utils.findBetween(body.items, "var ytInitialPlayerResponse =", "</script>", .left) orelse return FetchError.MissingPlayerData);
+        const initial_data = utils.findBetween(body.items, "var ytInitialData =", "</script>", .left) orelse return FetchError.MissingPlayerData;
+        const player_data = utils.findBetween(body.items, "var ytInitialPlayerResponse =", "</script>", .left) orelse return FetchError.MissingPlayerData;
 
-        const json = try std.json.parseFromSlice(std.json.Value, allocator, (try vm.eval("JSON.stringify(ytInitialData)") orelse return FetchError.MissingPlayerData).string, .{});
+        try vm.compile(initial_data);
+        try vm.compile(player_data);
+
+        const json = try std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            utils.findBetween(initial_data, "var ytInitialData =", ";", .none) orelse return FetchError.MissingPlayerData,
+            .{},
+        );
         defer json.deinit();
 
         // Get all video info
@@ -100,6 +110,8 @@ pub const Video = struct {
     }
 
     pub fn fetchStreamInfo(self: *Self) !StreamInfo {
+        defer self.vm.clearStack();
+
         const value = try self.vm.eval("JSON.stringify(ytInitialPlayerResponse.streamingData)") orelse return FetchStreamError.StreamingDataUnavailable;
         switch (value) {
             .string => |str| {
@@ -199,13 +211,13 @@ pub const Video = struct {
         // Find everything we need
         const cipher = utils.findBetween(sign, "s=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
         const sp = utils.findBetween(sign, "sp=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
-        const ncode = utils.findBetween(url, "&n=", "&", .none) orelse return DecodePlayerError.InvalidCipher;
+        const ncode = utils.findBetween(url, "&n=", "&", .none) orelse return DecodePlayerError.InvalidNCode;
 
         // Get decipher result & dencode result
         const decipher = try self.allocator.dupe(u8, ((try self.vm.call(self.decipher_func.?, .{cipher})) orelse return DecodePlayerError.InvalidCipher).string);
         defer self.allocator.free(decipher);
 
-        const dencode = try self.allocator.dupe(u8, ((try self.vm.call(self.ncode_func.?, .{ncode})) orelse return DecodePlayerError.InvalidCipher).string);
+        const dencode = try self.allocator.dupe(u8, ((try self.vm.call(self.ncode_func.?, .{ncode})) orelse return DecodePlayerError.InvalidNCode).string);
         defer self.allocator.free(dencode);
 
         return try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}&n={s}", .{ url, sp, decipher, dencode });
@@ -298,6 +310,7 @@ pub const Video = struct {
 
     const DecodePlayerError = error{
         InvalidCipher,
+        InvalidNCode,
     };
 
     const FetchStreamError = error{
@@ -352,8 +365,10 @@ pub const StreamInfo = struct {
                 large, // 480p
                 hd720, // 720p
                 hd1080, // 1080p
+                hd1440, // 1440p
+                hd2160, // 2K
 
-                // TODO: add support for 2K+
+                // TODO: add support for 4K+
             };
         };
 

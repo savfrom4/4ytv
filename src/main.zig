@@ -20,3 +20,21 @@ pub fn main() !void {
         std.debug.print("video: {{ video: {any}, audio: {any}, url: {s} }}\n", .{ stream.quality, stream.audio_quality, stream.url });
     }
 }
+
+const testing_alloc = std.testing.allocator;
+
+test "check leaks" {
+    var video = try Video.fetch(testing_alloc, "ByZzz-sxV_c");
+    defer video.dealloc();
+
+    var stream_info = try video.fetchStreamInfo();
+    defer stream_info.dealloc();
+
+    for (video.related.items) |related| {
+        std.debug.print("related {{ title: {s}, id {s} }}\n", .{ related.title, related.id });
+    }
+
+    for (stream_info.list.items) |stream| {
+        std.debug.print("video: {{ video: {any}, audio: {any}, url: {s} }}\n", .{ stream.quality, stream.audio_quality, stream.url });
+    }
+}
